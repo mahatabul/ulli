@@ -826,7 +826,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                 iso_size_gb = os.path.getsize(cached) / GiB
             else:
                 iso_size_gb = DISTROS[distro_key].get("size_gb", 6)
-        boot_gb = math.ceil(iso_size_gb) + 1
+        boot_gb = round(iso_size_gb + 1, 1)
 
         # Gather disk info
         all_disks = get_all_disks()
@@ -1463,10 +1463,11 @@ class InstallerWindow(Gtk.ApplicationWindow):
         shrink_dev = plan.get("shrink_dev")
         shrink_gb = plan.get("shrink_gb", 0)
         linux_gb = plan.get("linux_gb", 30)
-        self._boot_gb = plan.get("boot_gb", 4)
+        boot_gb_estimate = plan.get("boot_gb", 4)
+        self._boot_mib = math.ceil(boot_gb_estimate * 1024)
         self.log(f"Disk plan approved. Strategy: {strategy}, Target: {target_disk}")
         self.log(f"Target size : {linux_gb} GB")
-        self.log(f"Boot part   : {self._boot_gb} GB")
+        self.log(f"Boot part   : {boot_gb_estimate} GB (estimate, will rescan after ISO resolve)")
 
         # ── 2. resolve ISO ─────────────────────────────────────────────────
         if custom_mode:
@@ -1490,10 +1491,10 @@ class InstallerWindow(Gtk.ApplicationWindow):
                 if not self._download_iso(distro, iso_path):
                     return
 
-        # Recompute boot partition size from actual ISO file
-        actual_iso_gb = os.path.getsize(iso_path) / GiB
-        self._boot_gb = math.ceil(actual_iso_gb) + 1
-        self.log(f"ISO scanned  : {round(actual_iso_gb, 2)} GB → boot partition: {self._boot_gb} GB")
+        # Recompute boot partition size from actual ISO file: ISO size + 1 GB
+        iso_bytes = os.path.getsize(iso_path)
+        self._boot_mib = math.ceil(iso_bytes / (1024 * 1024)) + 1024
+        self.log(f"ISO scanned  : {round(iso_bytes / GiB, 2)} GB → boot partition: {self._boot_mib} MiB ({round(self._boot_mib / 1024, 1)} GB)")
 
         # ── 3. execute strategy ────────────────────────────────────────────
         self._boot_part_dev = None  # set by strategy if applicable
@@ -1772,7 +1773,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log("")
         self.log("━━ Strategy: btrfs shrink + new partition ━━")
 
-        total_shrink_gb = linux_gb + self._boot_gb
+        total_shrink_gb = linux_gb + self._boot_mib / 1024
 
         # ── get btrfs usage ──
         self.set_status("Querying btrfs filesystem usage…")
@@ -1877,7 +1878,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
         # ── create boot + linux partitions in freed space ──
         boot_start = actual_new_end + 1
-        boot_end = boot_start + self._boot_gb * 1024
+        boot_end = boot_start + self._boot_mib
         linux_start = boot_end + 1
         if next_part_start_mib is not None:
             linux_end_str = f"{next_part_start_mib - 1}MiB"
@@ -1905,7 +1906,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log("")
         self.log("━━ Strategy: use existing unallocated space ━━")
 
-        total_needed_gb = linux_gb + self._boot_gb
+        total_needed_gb = linux_gb + self._boot_mib / 1024
 
         parts, disk_label, _ = get_disk_partitions(disk_path)
         is_gpt = "gpt" in disk_label.lower()
@@ -1925,7 +1926,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                  f"({round(best_free['size_mib'] / 1024, 1)} GB)")
 
         boot_start = best_free["start_mib"] + 1
-        boot_end = boot_start + self._boot_gb * 1024
+        boot_end = boot_start + self._boot_mib
         linux_start = boot_end + 1
         linux_end_str = f"{best_free['end_mib'] - 1}MiB"
 
@@ -2216,7 +2217,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
         # Create boot + linux partitions in freed space
         boot_start = actual_new_end + 1
-        boot_end = boot_start + self._boot_gb * 1024
+        boot_end = boot_start + self._boot_mib
         linux_start = boot_end + 1
         linux_end_str = f"{next_part_start_mib - 1}MiB" if next_part_start_mib else "100%"
 
@@ -2241,7 +2242,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log("━━ Strategy: wipe & reformat entire disk ━━")
         self.log(f"Target disk: {disk_path}")
 
-        boot_gb = self._boot_gb
+        boot_mib = self._boot_mib
         esp_mib = 512  # 512 MiB EFI System Partition
 
         # Safety: make sure this is NOT the root disk
@@ -2375,12 +2376,12 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
             # Partition layout:
             #   1. ESP:        1 MiB – 513 MiB  (512 MiB, FAT32, esp flag)
-            #   2. LINUX_LIVE: 513 MiB – (513 + boot_gb*1024) MiB  (FAT32, live ISO)
+            #   2. LINUX_LIVE: 513 MiB – (513 + boot_mib) MiB  (FAT32, live ISO)
             #   3. Remaining:  unallocated for the Linux installer
             esp_start = 1        # MiB (1 MiB alignment)
             esp_end = esp_start + esp_mib
             boot_start = esp_end
-            boot_end = boot_start + boot_gb * 1024
+            boot_end = boot_start + boot_mib
 
             self.log(f"Creating ESP partition: {esp_start}–{esp_end} MiB")
             self.log(f"Creating boot partition: {boot_start}–{boot_end} MiB")
@@ -2509,9 +2510,9 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log("")
         self.log(f"Disk {disk_path} wiped and reformatted successfully:")
         self.log(f"  Partition 1: {esp_dev}  – EFI System Partition (512 MB)")
-        self.log(f"  Partition 2: {boot_dev} – LINUX_LIVE boot ({boot_gb} GB)")
+        self.log(f"  Partition 2: {boot_dev} – LINUX_LIVE boot ({round(boot_mib / 1024, 1)} GB)")
         remaining_gb = round(
-            (get_disk_partitions(disk_path)[2] / 1024) - (esp_mib / 1024) - boot_gb, 1)
+            (get_disk_partitions(disk_path)[2] / 1024) - (esp_mib / 1024) - boot_mib / 1024, 1)
         if remaining_gb > 0:
             self.log(f"  Remaining:   ~{remaining_gb} GB unallocated for Linux installer")
 
@@ -2837,7 +2838,7 @@ Linux Installer – Boot Instructions
 Strategy: btrfs partition shrink + new partition
 
 Distro:          {distro_label}
-Boot partition:  {boot_dev}  (FAT32, {self._boot_gb} GB – contains live ISO files)
+Boot partition:  {boot_dev}  (FAT32, {round(self._boot_mib / 1024, 1)} GB – contains live ISO files)
 Linux partition: {linux_dev}  (unformatted – installer will use this)
 
 To boot the live environment:
