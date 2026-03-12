@@ -15,30 +15,12 @@ Requirements:
                    grub-common grub2-common
 """
 
-import os, sys
-
-# Suppress dconf/ibus/proxy warnings when running as root (must be set before GTK import)
-_is_root = os.geteuid() == 0
-if _is_root:
-    os.environ["GSETTINGS_BACKEND"] = "memory"
-    os.environ["GTK_IM_MODULE"] = ""
-    os.environ["NO_AT_BRIDGE"] = "1"
-    # Redirect fd 2 to /dev/null — C libraries (GDBus, ibus) write warnings
-    # directly to the file descriptor, bypassing Python's sys.stderr.
-    # Python's own stderr is preserved for our code via sys.stderr.
-    _saved_stderr_fd = os.dup(2)
-    _devnull = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(_devnull, 2)
-    os.close(_devnull)
-    # Rewire Python's sys.stderr to the saved real fd so print(..., file=sys.stderr) still works
-    sys.stderr = os.fdopen(_saved_stderr_fd, "w", closefd=False)
-
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Vte", "2.91")
 from gi.repository import Gtk, Gdk, GLib, Pango, Vte
 
-import subprocess, threading, hashlib, shutil, json, time, signal, re
+import os, sys, subprocess, threading, hashlib, shutil, json, time, signal, re
 import urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime
@@ -1151,10 +1133,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                     radio_secondary.set_visible(False)
                     radio_secondary.set_active(False)
 
-                # Always offer wipe & reformat for non-root disks if disk is large enough
-                # Wipe only needs space for ESP (0.5 GB) + boot partition; the rest
-                # is left unallocated for the Linux installer to use as it sees fit.
-                wipe_min_gb = 0.5 + boot_gb + 1  # ESP + boot + at least 1 GB remaining
+                wipe_min_gb = 0.5 + boot_gb + 1
                 disk_size_ok = (sel["size_gb"] >= wipe_min_gb)
                 radio_wipe.set_label(
                     f"⚠ Wipe & reformat entire disk ({sel['size_gb']} GB) – "
@@ -1395,14 +1374,9 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
         self.log(f"Root device : {device}")
         self.log(f"Filesystem  : {fstype}")
-        if custom_mode:
-            iso_basename = os.path.basename(self.custom_iso_path) if self.custom_iso_path else "unknown"
-            self.log(f"Distro      : Custom ISO – {iso_basename}")
-            distro_label = os.path.splitext(iso_basename)[0]
-        else:
-            self.log(f"Distro      : {distro['label']}")
-            distro_label = distro["label"].split("(")[0].strip()
-        self._distro_label = distro_label
+        self.log(f"Distro      : {distro['label']}")
+
+        distro_label = distro["label"].split("(")[0].strip()
         plan_result = [None]
         plan_event = threading.Event()
 
@@ -1850,7 +1824,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         if not self._format_and_populate_boot(boot_part_dev, iso_path, distro, distro_key):
             return False
 
-        self._finalize_strategy(boot_part_dev, linux_part_dev, self._distro_label)
+        self._finalize_strategy(boot_part_dev, linux_part_dev, distro["label"])
         return True
 
     # ── use-free-space strategy (root or other disk) ─────────────────────────
@@ -1893,7 +1867,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         if not self._format_and_populate_boot(boot_dev, iso_path, distro, distro_key):
             return False
 
-        self._finalize_strategy(boot_dev, linux_dev, self._distro_label)
+        self._finalize_strategy(boot_dev, linux_dev, distro["label"])
         return True
 
     # ── filesystem shrink helpers ───────────────────────────────────────────
@@ -1975,7 +1949,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.set_status(f"Checking filesystem on {dev}…")
         self.log(f"Running e2fsck on {dev}…")
         code, out, err = run(["e2fsck", "-f", "-y", dev])
-        if code not in (0, 1):  # 1 = errors fixed
+        if code not in (0, 1):
             self.log(f"e2fsck failed ({code}): {err}", error=True)
             return False
 
@@ -2068,7 +2042,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             return False
 
         new_size = current_size - shrink_bytes
-        if new_size < GiB:  # 1 GB minimum
+        if new_size < GiB:
             self.log(f"New NTFS size would be too small: {bytes_to_gb(new_size)} GB",
                      error=True)
             return False
@@ -2184,7 +2158,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         if not self._format_and_populate_boot(boot_dev, iso_path, distro, distro_key):
             return False
 
-        self._finalize_strategy(boot_dev, linux_dev, self._distro_label)
+        self._finalize_strategy(boot_dev, linux_dev, distro["label"])
         return True
 
     # ── wipe-disk strategy (secondary drives only) ─────────────────────────
@@ -2197,7 +2171,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log(f"Target disk: {disk_path}")
 
         boot_gb = MIN_BOOT_GB
-        esp_mib = 512  # 512 MiB EFI System Partition
+        esp_mib = 512
 
         # Safety: make sure this is NOT the root disk
         root_info = get_root_fs_info()
@@ -2328,11 +2302,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             run(["partprobe", disk_path])
             time.sleep(1)
 
-            # Partition layout:
-            #   1. ESP:        1 MiB – 513 MiB  (512 MiB, FAT32, esp flag)
-            #   2. LINUX_LIVE: 513 MiB – (513 + boot_gb*1024) MiB  (FAT32, live ISO)
-            #   3. Remaining:  unallocated for the Linux installer
-            esp_start = 1        # MiB (1 MiB alignment)
+            esp_start = 1
             esp_end = esp_start + esp_mib
             boot_start = esp_end
             boot_end = boot_start + boot_gb * 1024
@@ -2474,7 +2444,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self._write_boot_instructions(
             boot_dev=boot_dev,
             linux_dev=f"{disk_path} (remaining unallocated space)",
-            distro_label=self._distro_label,
+            distro_label=distro["label"],
         )
         return True
 
@@ -2562,17 +2532,60 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
     def _update_grub(self):
         self.log("Updating GRUB…")
-        self.set_status("Running update-grub…")
-        for cmd in [["update-grub"], ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]]:
+        self.set_status("Running GRUB update…")
+
+        # Fedora/RHEL use grub2-mkconfig with EFI path; openSUSE uses
+        # grub2-mkconfig with a different path; Debian/Ubuntu use update-grub.
+        candidates = []
+
+        # Fedora / RHEL / CachyOS (dnf-based): grub2-mkconfig writes to the
+        # EFI directory when the system is booted in UEFI mode.
+        if os.path.isdir("/sys/firmware/efi"):
+            # Fedora/RHEL UEFI path
+            candidates.append((
+                ["grub2-mkconfig", "-o", "/boot/efi/EFI/fedora/grub.cfg"],
+                "Fedora/RHEL UEFI grub2-mkconfig"
+            ))
+            # CachyOS / Arch uses /boot/grub/grub.cfg
+            candidates.append((
+                ["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
+                "Arch/CachyOS grub-mkconfig"
+            ))
+
+        # Generic grub2-mkconfig (legacy BIOS or fallback UEFI)
+        candidates.append((
+            ["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"],
+            "grub2-mkconfig (BIOS / generic)"
+        ))
+        # Debian / Ubuntu helper script
+        candidates.append((
+            ["update-grub"],
+            "update-grub (Debian/Ubuntu)"
+        ))
+        # openSUSE
+        candidates.append((
+            ["grub2-mkconfig", "-o", "/boot/grub/grub.cfg"],
+            "grub2-mkconfig (openSUSE / generic)"
+        ))
+
+        for cmd, desc in candidates:
+            # Skip if the binary doesn't exist
+            if not shutil.which(cmd[0]):
+                continue
+            self.log(f"Trying: {desc}  ({' '.join(cmd)})")
             code, _, err = run(cmd)
             if code == 0:
-                self.log("GRUB updated successfully.")
+                self.log(f"GRUB updated successfully via: {desc}")
                 return True
-            if "not found" not in err and "No such file" not in err:
-                self.log(f"GRUB update warning: {err}")
+            self.log(f"  → returned {code}: {err.splitlines()[0] if err else '(no output)'}")
 
-        self.log("Could not update GRUB automatically.", error=True)
-        self.log("Run 'sudo update-grub' or 'sudo grub2-mkconfig -o /boot/grub2/grub.cfg' manually.")
+        self.log("Could not update GRUB automatically – no supported grub tool found.",
+                 error=True)
+        self.log("Run one of the following manually after reboot:")
+        self.log("  Fedora/RHEL (UEFI):  sudo grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg")
+        self.log("  Arch/CachyOS:        sudo grub-mkconfig -o /boot/grub/grub.cfg")
+        self.log("  Debian/Ubuntu:       sudo update-grub")
+        self.log("  Generic BIOS:        sudo grub2-mkconfig -o /boot/grub2/grub.cfg")
         return False
 
     def _set_uefi_boot_entry(self, boot_part_dev, distro_label):
@@ -2806,15 +2819,14 @@ def ensure_root():
     desktop session.
     """
     if os.geteuid() == 0:
-        return  # already root
+        return
 
     # Build the command: pkexec env <display‑vars> python3 this_script.py <args>
     # pkexec sanitises the environment, so we must explicitly pass
     # the display variables needed for the GUI to work.
     env_vars = []
     for var in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
-                "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
-                "HOME", "XDG_CONFIG_HOME", "DCONF_PROFILE"):
+                "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
         val = os.environ.get(var)
         if val:
             env_vars.append(f"{var}={val}")
@@ -2830,12 +2842,8 @@ def ensure_root():
     except Exception as e:
         # If pkexec is missing or the user cancels, fall back to sudo
         print(f"pkexec failed ({e}), trying sudo…")
-        cmd_sudo = ["sudo",
-                    "GSETTINGS_BACKEND=memory", "GTK_IM_MODULE=none",
-                    "NO_AT_BRIDGE=1",
-                    "--preserve-env=DISPLAY,XAUTHORITY,WAYLAND_DISPLAY,"
-                    "XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,"
-                    "HOME,XDG_CONFIG_HOME,DCONF_PROFILE",
+        cmd_sudo = ["sudo", "--preserve-env=DISPLAY,XAUTHORITY,WAYLAND_DISPLAY,"
+                    "XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS",
                     sys.executable] + sys.argv
         try:
             os.execvp("sudo", cmd_sudo)
