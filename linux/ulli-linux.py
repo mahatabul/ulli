@@ -48,6 +48,7 @@ from datetime import datetime
 MIN_BOOT_GB   = 7
 MIN_LINUX_GB  = 20
 GiB           = 1_073_741_824
+GB            = 1_000_000_000
 
 DISTROS = {
     "mint": {
@@ -158,6 +159,14 @@ def get_partition_info(device):
 
 def bytes_to_gb(b):
     return round(b / 1e9, 2)
+
+def gb_to_mib(gb):
+    """Convert decimal gigabytes to mebibytes."""
+    return round(gb * GB / (1024 * 1024))
+
+def mib_to_gb(mib):
+    """Convert mebibytes to decimal gigabytes."""
+    return round(mib * 1024 * 1024 / 1e9, 2)
 
 def sha256_file(path, progress_cb=None):
     h = hashlib.sha256()
@@ -319,11 +328,11 @@ def get_disk_layout_text(disk_path):
     parts, label, total_mib = get_disk_partitions(disk_path)
     lines = []
     if not parts:
-        lines.append(f"  [Empty disk]  {round(total_mib / 1024, 2)} GB")
+        lines.append(f"  [Empty disk]  {mib_to_gb(total_mib)} GB")
         return lines
 
     for p in parts:
-        size_gb = round(p["size_mib"] / 1024, 2)
+        size_gb = mib_to_gb(p["size_mib"])
         if p["is_free"]:
             if size_gb > 0.01:
                 lines.append(f"  [Unallocated]             {size_gb} GB")
@@ -834,7 +843,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         for d in all_disks:
             size_gb = round(d["size_bytes"] / 1e9, 1)
             free_mib = get_disk_unallocated_mib(d["path"])
-            free_gb = round(free_mib / 1024, 1)
+            free_gb = round(mib_to_gb(free_mib), 1)
             is_root = (d["path"] == root_disk_path)
             prefix = f"{d['name']} (current OS)" if is_root else d["name"]
             model = d["model"] or "Disk"
@@ -998,7 +1007,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             # Current layout
             layout_lines = get_disk_layout_text(sel_path)
             free_mib = get_disk_unallocated_mib(sel_path)
-            free_gb = round(free_mib / 1024, 1)
+            free_gb = round(mib_to_gb(free_mib), 1)
             if free_gb > 0.01:
                 layout_lines.append("")
                 layout_lines.append(f"  Total unallocated space: {free_gb} GB")
@@ -1097,7 +1106,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                     for p in parts:
                         if p["is_free"]:
                             continue
-                        s_gb = round(p["size_mib"] / 1024, 2)
+                        s_gb = mib_to_gb(p["size_mib"])
                         if p["num"] == root_part_num:
                             after_lines.append(
                                 f"  Root ({root_dev})       {new_size_gb} GB  (shrunk)")
@@ -1138,7 +1147,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                                 "dev": dev_p,
                                 "num": p["num"],
                                 "fstype": fs,
-                                "size_gb": round(p["size_mib"] / 1024, 2),
+                                "size_gb": mib_to_gb(p["size_mib"]),
                                 "free_gb": round(free_b / 1e9, 2),
                             })
 
@@ -1153,7 +1162,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                     fs = get_partition_fstype(dev_p)
                     if fs and fs not in SHRINKABLE_FS and fs not in ("vfat", "swap", ""):
                         non_shrinkable_fs.append({"dev": dev_p, "fstype": fs,
-                            "size_gb": round(p["size_mib"] / 1024, 2)})
+                            "size_gb": mib_to_gb(p["size_mib"])})
 
                 if has_free:
                     radio_primary.set_label(
@@ -1261,7 +1270,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                     for p in parts:
                         if p["is_free"]:
                             continue
-                        s_gb = round(p["size_mib"] / 1024, 2)
+                        s_gb = mib_to_gb(p["size_mib"])
                         dev_p = _part_dev_path(sel_path, p["num"])
                         if dev_p == best["dev"]:
                             after_lines.append(
@@ -1291,7 +1300,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                     for p in parts:
                         if p["is_free"]:
                             continue
-                        s_gb = round(p["size_mib"] / 1024, 2)
+                        s_gb = mib_to_gb(p["size_mib"])
                         dev_p = _part_dev_path(sel_path, p["num"])
                         lbl = p["name"] or get_partition_fstype(dev_p) or "Partition"
                         after_lines.append(f"  {lbl:<22} {s_gb} GB  (unchanged)")
@@ -1322,7 +1331,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                     for p in parts:
                         if p["is_free"]:
                             continue
-                        s_gb = round(p["size_mib"] / 1024, 2)
+                        s_gb = mib_to_gb(p["size_mib"])
                         dev_p = _part_dev_path(sel_path, p["num"])
                         lbl = p["name"] or get_partition_fstype(dev_p) or "Partition"
                         after_lines.append(f"  {lbl:<22} {s_gb} GB  (unchanged)")
@@ -1772,8 +1781,8 @@ class InstallerWindow(Gtk.ApplicationWindow):
                 used = int(stripped.split(":")[1].strip().split()[0])
 
         free_bytes = dev_size - used
-        needed_bytes = total_shrink_gb * GiB
-        safe_free = free_bytes - (10 * GiB)
+        needed_bytes = total_shrink_gb * GB
+        safe_free = free_bytes - (10 * GB)
 
         self.log(f"btrfs device size : {bytes_to_gb(dev_size)} GB")
         self.log(f"btrfs used        : {bytes_to_gb(used)} GB")
@@ -1844,7 +1853,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             self.log("Cannot determine partition boundaries.", error=True)
             return False
 
-        new_part_size_mib = part_end_mib - part_start_mib - total_shrink_gb * 1024
+        new_part_size_mib = part_end_mib - part_start_mib - gb_to_mib(total_shrink_gb)
         if new_part_size_mib < 1:
             self.log("Calculated new partition size is too small!", error=True)
             return False
@@ -1859,7 +1868,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
         # ── create boot + linux partitions in freed space ──
         boot_start = actual_new_end + 1
-        boot_end = boot_start + MIN_BOOT_GB * 1024
+        boot_end = boot_start + gb_to_mib(MIN_BOOT_GB)
         linux_start = boot_end + 1
         if next_part_start_mib is not None:
             linux_end_str = f"{next_part_start_mib - 1}MiB"
@@ -1895,7 +1904,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         # Find largest free region that fits
         best_free = None
         for p in parts:
-            if p["is_free"] and p["size_mib"] >= total_needed_gb * 1024:
+            if p["is_free"] and p["size_mib"] >= gb_to_mib(total_needed_gb):
                 if best_free is None or p["size_mib"] > best_free["size_mib"]:
                     best_free = p
 
@@ -1904,10 +1913,10 @@ class InstallerWindow(Gtk.ApplicationWindow):
             return False
 
         self.log(f"Using free region: {best_free['start_mib']}–{best_free['end_mib']} MiB "
-                 f"({round(best_free['size_mib'] / 1024, 1)} GB)")
+                 f"({round(mib_to_gb(best_free['size_mib']), 1)} GB)")
 
         boot_start = best_free["start_mib"] + 1
-        boot_end = boot_start + MIN_BOOT_GB * 1024
+        boot_end = boot_start + gb_to_mib(MIN_BOOT_GB)
         linux_start = boot_end + 1
         linux_end_str = f"{best_free['end_mib'] - 1}MiB"
 
@@ -2159,7 +2168,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
                      f"only btrfs, ext4, and NTFS are supported.", error=True)
             return False
 
-        needed_bytes = shrink_gb * GiB
+        needed_bytes = shrink_gb * GB
         shrink_fn = {"btrfs": self._shrink_btrfs, "ntfs": self._shrink_ntfs}.get(
             fstype, self._shrink_ext)
         if not shrink_fn(shrink_dev, needed_bytes):
@@ -2189,7 +2198,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             self.log("Cannot determine partition boundaries.", error=True)
             return False
 
-        new_part_size_mib = part_end_mib - part_start_mib - shrink_gb * 1024
+        new_part_size_mib = part_end_mib - part_start_mib - gb_to_mib(shrink_gb)
 
         actual_new_end = self._resize_partition_entry(
             disk_path, part_num, part_start_mib, new_part_size_mib)
@@ -2198,7 +2207,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
         # Create boot + linux partitions in freed space
         boot_start = actual_new_end + 1
-        boot_end = boot_start + MIN_BOOT_GB * 1024
+        boot_end = boot_start + gb_to_mib(MIN_BOOT_GB)
         linux_start = boot_end + 1
         linux_end_str = f"{next_part_start_mib - 1}MiB" if next_part_start_mib else "100%"
 
@@ -2362,7 +2371,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
             esp_start = 1        # MiB (1 MiB alignment)
             esp_end = esp_start + esp_mib
             boot_start = esp_end
-            boot_end = boot_start + boot_gb * 1024
+            boot_end = boot_start + gb_to_mib(boot_gb)
 
             self.log(f"Creating ESP partition: {esp_start}–{esp_end} MiB")
             self.log(f"Creating boot partition: {boot_start}–{boot_end} MiB")
@@ -2493,7 +2502,7 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log(f"  Partition 1: {esp_dev}  – EFI System Partition (512 MB)")
         self.log(f"  Partition 2: {boot_dev} – LINUX_LIVE boot ({boot_gb} GB)")
         remaining_gb = round(
-            (get_disk_partitions(disk_path)[2] / 1024) - (esp_mib / 1024) - boot_gb, 1)
+            mib_to_gb(get_disk_partitions(disk_path)[2]) - mib_to_gb(esp_mib) - boot_gb, 1)
         if remaining_gb > 0:
             self.log(f"  Remaining:   ~{remaining_gb} GB unallocated for Linux installer")
 
