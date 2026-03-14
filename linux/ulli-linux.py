@@ -89,6 +89,17 @@ DISTROS = {
         ],
         "live_path": "casper/vmlinuz",
     },
+    "cachyos": {
+        "label":    "CachyOS Desktop  (~2.6 GB)",
+        "filename": "cachyos-desktop-linux-260308.iso",
+        "sha256":   "69f1ffbded158d4d95e6567e994b1813d0d040d323742aef9f489a0b71ad1d29",
+        "size_gb":  2.6,
+        "mirrors": [
+            "https://cdn77.cachyos.org/ISO/desktop/260308/cachyos-desktop-linux-260308.iso",
+        ],
+        "live_path": "boot/vmlinuz-linux-cachyos",
+        "hybrid": True,
+    },
     "ubuntu": {
         "label":    "Ubuntu 24.04.4 LTS – GNOME  (~5.9 GB)",
         "filename": "ubuntu-24.04.4-desktop-amd64.iso",
@@ -352,6 +363,20 @@ def iso_cache_dir():
     d = Path.home() / ".cache" / "linux-installer"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+def _fix_cache_permissions():
+    """Fix root-owned cache dir/files left by a previous privileged run."""
+    d = Path.home() / ".cache" / "linux-installer"
+    if not d.exists():
+        return
+    uid, gid = os.getuid(), os.getgid()
+    # Check if any file/dir is owned by someone else (typically root)
+    try:
+        st = d.stat()
+        if st.st_uid != uid or st.st_gid != gid:
+            run(["chown", "-R", f"{uid}:{gid}", str(d)])
+    except OSError:
+        pass
 
 # ─── disk enumeration helpers ────────────────────────────────────────────────
 
@@ -643,9 +668,16 @@ class InstallerWindow(Gtk.ApplicationWindow):
         }
         .distro-radio {
             font-family: 'IBM Plex Mono', monospace;
-            font-size: 12px; color: #c8cdd8;
+            font-size: 12px; color: #000000;
         }
+        .distro-radio * { color: #000000; }
+        .distro-radio cellview { color: #000000; }
         .distro-radio:checked { color: #87b94a; }
+        .custom-iso-check {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px; color: #ffffff;
+        }
+        .custom-iso-check label { color: #ffffff; }
         .disk-info { font-family: monospace; font-size: 11px; color: #8892a4; }
         .fs-btrfs { color: #5bc8f5; font-weight: bold; }
         .fs-other { color: #aaaaaa; }
@@ -791,24 +823,23 @@ class InstallerWindow(Gtk.ApplicationWindow):
 
     def _build_distro_group(self):
         outer, inner = self._group_frame("DISTRIBUTION")
-        self.distro_radios = {}
-        first_btn = None
-        for key, info in DISTROS.items():
-            btn = Gtk.RadioButton.new_with_label_from_widget(first_btn, info["label"])
-            btn.get_style_context().add_class("distro-radio")
-            btn.connect("toggled", self._on_distro_toggled, key)
-            inner.pack_start(btn, False, False, 2)
-            self.distro_radios[key] = btn
-            if first_btn is None:
-                first_btn = btn
-        first_btn.set_active(True)
+
+        # Distro dropdown
+        self._distro_keys = list(DISTROS.keys())
+        self.distro_combo = Gtk.ComboBoxText()
+        self.distro_combo.get_style_context().add_class("distro-radio")
+        for key in self._distro_keys:
+            self.distro_combo.append_text(DISTROS[key]["label"])
+        self.distro_combo.set_active(0)
+        self.distro_combo.connect("changed", self._on_distro_combo_changed)
+        inner.pack_start(self.distro_combo, False, False, 2)
 
         sep = Gtk.Separator(); inner.pack_start(sep, False, False, 4)
 
-        # Custom ISO row – radio button in same group as distro radios
+        # Custom ISO row
         custom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.custom_radio = Gtk.RadioButton.new_with_label_from_widget(first_btn, "Use existing ISO:")
-        self.custom_radio.get_style_context().add_class("distro-radio")
+        self.custom_radio = Gtk.CheckButton(label="Use existing ISO:")
+        self.custom_radio.get_style_context().add_class("custom-iso-check")
         self.custom_radio.connect("toggled", self._on_custom_toggled)
         custom_row.pack_start(self.custom_radio, False, False, 0)
         self.custom_entry = Gtk.Entry(); self.custom_entry.set_sensitive(False)
@@ -873,14 +904,16 @@ class InstallerWindow(Gtk.ApplicationWindow):
         return bar
 
     # ── signal handlers ───────────────────────────────────────────────────────
-    def _on_distro_toggled(self, btn, key):
-        if btn.get_active():
-            self.selected_distro = key
+    def _on_distro_combo_changed(self, combo):
+        idx = combo.get_active()
+        if 0 <= idx < len(self._distro_keys):
+            self.selected_distro = self._distro_keys[idx]
 
     def _on_custom_toggled(self, btn):
         on = btn.get_active()
         self.custom_entry.set_sensitive(on)
         self.browse_btn.set_sensitive(on)
+        self.distro_combo.set_sensitive(not on)
 
     def _on_browse(self, _btn):
         dlg = Gtk.FileChooserDialog(
@@ -1591,6 +1624,8 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.log("Linux Live Installer starting")
         self.log("=" * 52)
 
+        # Fix root-owned cache files left by previous runs
+        _fix_cache_permissions()
 
         # ── 1. gather info ─────────────────────────────────────────────────
         self.fs_info = get_root_fs_info()
