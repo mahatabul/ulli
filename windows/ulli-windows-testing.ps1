@@ -3288,7 +3288,7 @@ exit
             Log-Message ""
         } else {
             if ($useRefind -and $script:RefindDriveLetter) {
-                Log-Message "To boot $distroName:"
+                Log-Message "To boot ${distroName}:"
                 Log-Message "1. Restart your computer"
                 Log-Message "2. rEFInd should appear automatically and show `"$distroName`""
                 Log-Message "3. If rEFInd doesn't appear, enter UEFI/BIOS (F2/F10/F12/DEL)"
