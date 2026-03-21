@@ -36,6 +36,11 @@ Alternatively you can turn off smart app control under windows security, and the
 
 ---
 
+## rEFInd
+
+ULLI includes an option to install the boot manager rEFInd (https://www.rodsbooks.com/refind/). This requires disabling secure boot.
+
+
 ## Important Notes
 
 - You may have to disable bitlocker/decrypt your hard drive to use this software.
