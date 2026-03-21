@@ -890,14 +890,14 @@ class InstallerWindow(Gtk.ApplicationWindow):
         self.ext4_boot_check = Gtk.CheckButton(
             label="Use ext4 boot partition (12 GB) instead of FAT32 (7 GB)  –  "
                   "required for large distros (Bazzite, etc.) · requires rEFInd")
-        self.ext4_boot_check.set_active(True)
+        self.ext4_boot_check.set_active(False)
         self.ext4_boot_check.connect("toggled", self._on_ext4_boot_toggled)
         bar.pack_start(self.ext4_boot_check, False, False, 0)
 
         self.refind_check = Gtk.CheckButton(
             label="Install rEFInd boot manager  –  "
                   "required for large distros (Bazzite, etc.) · requires disabling Secure Boot")
-        self.refind_check.set_active(True)
+        self.refind_check.set_active(False)
         self.refind_check.connect("toggled", self._on_refind_toggled)
         bar.pack_start(self.refind_check, False, False, 0)
 
