@@ -2213,24 +2213,97 @@ function Start-Installation {
     $script:WslMountInfo = $null  # track WSL mount for cleanup
     Log-Message "Disk plan approved. Strategy: $selectedStrategy, Target disk: $targetDiskNumber, Linux size: $linuxSizeGB GB$refindNote$ext4Note"
 
-    # Validate WSL availability if ext4 boot is selected
+    # Validate WSL availability if ext4 boot is selected — auto-install if missing
     if ($useExt4Boot) {
         Log-Message "Checking WSL availability for ext4 boot partition..."
         if (-not (Test-WslAvailable)) {
-            [System.Windows.Forms.MessageBox]::Show(
-                "WSL (Windows Subsystem for Linux) is required to create ext4 partitions.`n`n" +
-                "Please install WSL first:`n" +
-                "  wsl --install`n`n" +
-                "Then restart your computer and re-run ULLI.",
-                "WSL Required",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
+            $installWsl = [System.Windows.Forms.MessageBox]::Show(
+                "WSL (Windows Subsystem for Linux) is required to create ext4 partitions " +
+                "but is not currently installed or has no Linux distribution.`n`n" +
+                "Would you like to install WSL now?`n`n" +
+                "This will:`n" +
+                "  - Enable the WSL Windows feature`n" +
+                "  - Download and install a default Linux distribution`n" +
+                "  - This may take several minutes`n`n" +
+                "A restart may be required after installation.",
+                "Install WSL?",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Question
             )
-            Log-Message "Installation cancelled: WSL is not available." -Error
-            Set-Status "Ready to install"
-            return
+            if ($installWsl -ne [System.Windows.Forms.DialogResult]::Yes) {
+                Log-Message "Installation cancelled: WSL is required for ext4 boot." -Error
+                Set-Status "Ready to install"
+                return
+            }
+
+            Log-Message "Installing WSL... This may take several minutes."
+            Set-Status "Installing WSL (this may take several minutes)..."
+            $form.Refresh()
+
+            try {
+                $wslInstallOutput = & wsl --install --no-launch 2>&1
+                $wslInstallExit = $LASTEXITCODE
+                foreach ($line in $wslInstallOutput) {
+                    $cleanLine = ($line -replace "`0", "").Trim()
+                    if ($cleanLine) { Log-Message "  WSL: $cleanLine" }
+                }
+
+                if ($wslInstallExit -ne 0) {
+                    # wsl --install may return non-zero when a reboot is needed
+                    $needsReboot = $wslInstallOutput | Where-Object { $_ -match "restart|reboot" }
+                    if ($needsReboot) {
+                        Log-Message "WSL installed but a system restart is required." -Error
+                        [System.Windows.Forms.MessageBox]::Show(
+                            "WSL has been installed but a system restart is required " +
+                            "before it can be used.`n`n" +
+                            "Please restart your computer and re-run ULLI.",
+                            "Restart Required",
+                            [System.Windows.Forms.MessageBoxButtons]::OK,
+                            [System.Windows.Forms.MessageBoxIcon]::Information
+                        )
+                        Set-Status "Ready to install"
+                        return
+                    }
+                }
+
+                Log-Message "WSL installation command completed. Verifying..."
+                Start-Sleep -Seconds 5
+
+                if (-not (Test-WslAvailable)) {
+                    # WSL feature may be enabled but needs reboot
+                    Log-Message "WSL is not yet available after installation." -Error
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "WSL was installed but is not yet available.`n`n" +
+                        "A system restart is likely required.`n" +
+                        "Please restart your computer and re-run ULLI.",
+                        "Restart Required",
+                        [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Information
+                    )
+                    Set-Status "Ready to install"
+                    return
+                }
+
+                Log-Message "WSL is now available."
+            }
+            catch {
+                Log-Message "Failed to install WSL: $_" -Error
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Failed to install WSL automatically.`n`n" +
+                    "Error: $_`n`n" +
+                    "Please install WSL manually by running:`n" +
+                    "  wsl --install`n`n" +
+                    "Then restart your computer and re-run ULLI.",
+                    "WSL Installation Failed",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error
+                )
+                Set-Status "Ready to install"
+                return
+            }
+        } else {
+            Log-Message "WSL is available."
         }
-        Log-Message "WSL is available."
     }
 
     # Now lock the UI and proceed
