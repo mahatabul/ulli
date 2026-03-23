@@ -2310,28 +2310,26 @@ function Start-Installation {
                 $form.Refresh()
 
                 try {
-                    $wslInstallOutput = & wsl --install --no-launch 2>&1
+                    # Enable WSL + VMP features only (no distro download -- that happens after reboot)
+                    $wslInstallOutput = & wsl --install --no-distribution 2>&1
                     $wslInstallExit = $LASTEXITCODE
                     foreach ($line in $wslInstallOutput) {
-                        $cleanLine = ($line -replace "`0", "").Trim()
+                        $cleanLine = ("$line" -replace "`0", "").Trim()
                         if ($cleanLine) { Log-Message "  WSL: $cleanLine" }
                     }
 
-                    Log-Message "WSL installation command completed. Verifying..."
+                    Log-Message "WSL feature installation completed. Verifying..."
                     Start-Sleep -Seconds 5
 
+                    # After enabling features, a reboot is almost always required
                     if (Test-WslAvailable) {
                         Log-Message "WSL is now available."
-                    } elseif (Install-WslDistro) {
-                        # Features enabled, distro installed successfully now
-                        Log-Message "WSL is now available."
                     } else {
-                        # Need reboot for features to activate
-                        Log-Message "WSL features require a system restart to activate."
+                        Log-Message "WSL features installed. A system restart is required."
                         $rebootNow = [System.Windows.Forms.MessageBox]::Show(
-                            "WSL was installed but requires a system restart.`n`n" +
+                            "WSL features have been installed but require a system restart.`n`n" +
                             "After restart, re-run ULLI and select ext4 boot again.`n" +
-                            "The Linux distribution will be installed automatically (no second reboot).`n`n" +
+                            "The Ubuntu distribution will be installed automatically (no second reboot).`n`n" +
                             "The computer will restart after you click OK.",
                             "Restart Required",
                             [System.Windows.Forms.MessageBoxButtons]::OKCancel,
