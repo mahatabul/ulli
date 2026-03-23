@@ -35,6 +35,7 @@ $script:RefindUrl = "https://sourceforge.net/projects/refind/files/0.14.2/refind
 $script:RefindFilename = "refind-bin-0.14.2.zip"
 $script:RefindSizeMB = 100  # 100 MB FAT32 partition for rEFInd
 $script:MinPartitionSizeGBExt4 = 12  # 12 GB ext4 boot partition (requires WSL + rEFInd)
+$script:WslFeatureFlagPath = "$env:LOCALAPPDATA\ULLI\wsl_features_pending.flag"
 
 # ─── Distro Data Table ────────────────────────────────────────────────────────
 $script:Distros = [ordered]@{
@@ -390,28 +391,9 @@ function Test-WslAvailable {
 }
 
 function Install-WslDistro {
-    # Install just a WSL distro -- works when WSL features are already enabled (e.g. after reboot)
-    # First, quick check if WSL2 can even work (avoids downloading a distro for nothing)
-    Log-Message "Checking if WSL2 is functional..."
-    Set-Status "Checking WSL2 availability..."
-    $form.Refresh()
-
-    # Check if hardware virtualization is available (VT-x/AMD-V)
-    # Without this, Hyper-V and WSL2 cannot create VMs
-    try {
-        $cpuInfo = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
-        if ($cpuInfo.VirtualizationFirmwareEnabled -eq $false) {
-            Log-Message "WSL2 is not functional: hardware virtualization (VT-x/AMD-V) is not available." -Error
-            Log-Message "  Enable virtualization in BIOS/UEFI, or enable nested virtualization if in a VM."
-            Log-Message "  (VirtualBox: power off VM fully, then run VBoxManage modifyvm <name> --nested-hw-virt on)"
-            return $false
-        }
-    } catch {
-        Log-Message "Warning: Could not check hardware virtualization status: $_"
-    }
-
-    Log-Message "No WSL distribution found. Installing Ubuntu..."
-    Set-Status "Installing WSL Ubuntu distribution..."
+    # Install just a WSL distro -- called only after WSL features are confirmed installed (flag file exists)
+    Log-Message "Installing WSL Ubuntu distribution..."
+    Set-Status "Installing WSL Ubuntu distribution (this may take a few minutes)..."
     $form.Refresh()
 
     $distroOutput = & wsl --install -d Ubuntu --no-launch 2>&1
@@ -422,12 +404,14 @@ function Install-WslDistro {
         Log-Message "  WSL: $line"
     }
 
-    # Check for errors indicating WSL features aren't ready
+    # Check for errors indicating Hyper-V/VMP still not functional
     $featureMissing = $distroLines | Where-Object {
         $_ -match "HCS_E_HYPERV_NOT_INSTALLED|Virtual Machine Platform|not supported with your current|EnableVirtualization|0x80370102"
     }
     if ($featureMissing) {
-        Log-Message "WSL distro install failed: WSL2 virtualization not available." -Error
+        Log-Message "WSL2 virtualization is not available on this system." -Error
+        Log-Message "  Ensure hardware virtualization (VT-x/AMD-V) is enabled in BIOS/UEFI."
+        Log-Message "  If running in a VM, enable nested virtualization and fully power off/restart the VM."
         return $false
     }
 
@@ -2280,12 +2264,33 @@ function Start-Installation {
     if ($useExt4Boot) {
         Log-Message "Checking WSL availability for ext4 boot partition..."
         if (-not (Test-WslAvailable)) {
-            # Step 1: Try installing just a distro (handles post-reboot case where features are already active)
-            Log-Message "WSL not ready. Attempting to install Ubuntu distribution..."
-            $distroInstalled = Install-WslDistro
+            $featuresPending = Test-Path $script:WslFeatureFlagPath
 
-            if (-not $distroInstalled -and -not (Test-WslAvailable)) {
-                # Step 2: Distro install failed -- WSL features likely not active, need full install + reboot
+            if ($featuresPending) {
+                # Post-reboot path: WSL features were previously installed, just need a distro
+                Log-Message "WSL features were previously installed. Installing Ubuntu distribution..."
+                if (Install-WslDistro) {
+                    # Success -- clean up flag
+                    Remove-Item $script:WslFeatureFlagPath -Force -ErrorAction SilentlyContinue
+                } else {
+                    # Distro install failed -- likely hardware virtualization issue
+                    Remove-Item $script:WslFeatureFlagPath -Force -ErrorAction SilentlyContinue
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "WSL2 could not create a virtual machine.`n`n" +
+                        "This usually means hardware virtualization is not available:`n" +
+                        "  - In BIOS/UEFI: enable VT-x (Intel) or AMD-V`n" +
+                        "  - In a VM: enable nested virtualization and fully power off/restart`n`n" +
+                        "The ext4 boot option requires a working WSL2.`n" +
+                        "You can retry, or uncheck 'ext4 boot partition' to use FAT32 instead.",
+                        "WSL2 Not Available",
+                        [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Error
+                    )
+                    Set-Status "Ready to install"
+                    return
+                }
+            } else {
+                # First-time path: install WSL features only (no distro download), then reboot
                 $installWsl = [System.Windows.Forms.MessageBox]::Show(
                     "WSL (Windows Subsystem for Linux) is required to create ext4 partitions " +
                     "but is not currently available.`n`n" +
@@ -2293,7 +2298,7 @@ function Start-Installation {
                     "This will:`n" +
                     "  - Enable the WSL and Virtual Machine Platform features`n" +
                     "  - A system restart will be required`n" +
-                    "  - After restart, re-run ULLI - the distro will be installed automatically`n`n" +
+                    "  - After restart, re-run ULLI and Ubuntu will be installed automatically`n`n" +
                     "Note: Virtualization must be enabled in your BIOS/UEFI settings.",
                     "Install WSL?",
                     [System.Windows.Forms.MessageBoxButtons]::YesNo,
@@ -2305,12 +2310,11 @@ function Start-Installation {
                     return
                 }
 
-                Log-Message "Installing WSL features... This may take several minutes."
-                Set-Status "Installing WSL features (this may take several minutes)..."
+                Log-Message "Installing WSL features (no distro download yet)..."
+                Set-Status "Installing WSL features..."
                 $form.Refresh()
 
                 try {
-                    # Enable WSL + VMP features only (no distro download -- that happens after reboot)
                     $wslInstallOutput = & wsl --install --no-distribution 2>&1
                     $wslInstallExit = $LASTEXITCODE
                     foreach ($line in $wslInstallOutput) {
@@ -2318,18 +2322,24 @@ function Start-Installation {
                         if ($cleanLine) { Log-Message "  WSL: $cleanLine" }
                     }
 
-                    Log-Message "WSL feature installation completed. Verifying..."
-                    Start-Sleep -Seconds 5
+                    Log-Message "WSL feature installation completed."
 
-                    # After enabling features, a reboot is almost always required
+                    # Check if WSL is already usable (rare -- usually needs reboot)
                     if (Test-WslAvailable) {
-                        Log-Message "WSL is now available."
+                        Log-Message "WSL is now available (no reboot needed)."
                     } else {
+                        # Save flag so next run knows to install distro only
+                        $flagDir = Split-Path $script:WslFeatureFlagPath
+                        if (-not (Test-Path $flagDir)) {
+                            New-Item -Path $flagDir -ItemType Directory -Force | Out-Null
+                        }
+                        "features_installed" | Out-File $script:WslFeatureFlagPath -Force
+
                         Log-Message "WSL features installed. A system restart is required."
                         $rebootNow = [System.Windows.Forms.MessageBox]::Show(
                             "WSL features have been installed but require a system restart.`n`n" +
                             "After restart, re-run ULLI and select ext4 boot again.`n" +
-                            "The Ubuntu distribution will be installed automatically (no second reboot).`n`n" +
+                            "Ubuntu will be downloaded and installed automatically.`n`n" +
                             "The computer will restart after you click OK.",
                             "Restart Required",
                             [System.Windows.Forms.MessageBoxButtons]::OKCancel,
